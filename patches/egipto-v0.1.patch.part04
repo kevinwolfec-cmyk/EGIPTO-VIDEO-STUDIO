@@ -1,0 +1,180 @@
++    static QString textForRange(const QString &text, const QList<Word> &words, int begin, int end);
++    static SceneBlock blockForRange(const QString &text, const QList<Word> &words, int begin, int end);
++    static QList<SceneBlock> splitRange(const QString &text, const QList<Word> &words, int begin, int end);
++    static QList<SceneBlock> mergeShort(const QList<SceneBlock> &blocks);
++    static QList<SceneBlock> applyPreroll(const QList<SceneBlock> &blocks, double prerollSeconds = 0.100);
++
++    int findTrack(const QString &type, const QString &name) const;
++    int ensureNamedTrack(const QString &type, const QString &name);
++    void importAndPlaceVoice(const QString &path, double durationSeconds);
++    void tryPlacePendingVoice();
++
++    void scheduleAutoPlacement();
++    void autoPlaceAvailableMedia();
++    bool placeVisualAsset(int assetIndex, int blockIndex);
++    QList<int> visualAssetIndexesInNaturalOrder() const;
++
++    AssetLibrary *m_assets = nullptr;
++    AppController *m_editor = nullptr;
++    QNetworkAccessManager *m_network = nullptr;
++    QNetworkReply *m_reply = nullptr;
++
++    QString m_apiKey;
++    QString m_referenceId;
++    QString m_modelId = QStringLiteral("s2-pro");
++    double m_speed = 1.0;
++    bool m_autoPlaceMedia = true;
++    bool m_busy = false;
++    QString m_status;
++    QString m_errorString;
++    QVariantList m_voices;
++    QVariantList m_blocks;
++
++    QString m_script;
++    QByteArray m_sseBuffer;
++    QByteArray m_audioBytes;
++    QList<Segment> m_segments;
++    QMap<int, QList<Segment>> m_segmentsByChunk;
++    QString m_outputAudioPath;
++
++    int m_nextMediaSlot = 0;
++    QSet<QString> m_placedVisualAssetIds;
++    QString m_pendingVoiceAssetId;
++    double m_pendingVoiceDuration = 0.0;
++    bool m_autoPlacementScheduled = false;
++};
+diff --git a/src/qml/AssetsPanel.qml b/src/qml/AssetsPanel.qml
+index f40c90d..9f9d8be 100644
+--- a/src/qml/AssetsPanel.qml
++++ b/src/qml/AssetsPanel.qml
+@@ -558,7 +558,8 @@ PanelFrame {
+     }
+ 
+     function kindsForTab(tabId) {
+-        if (tabId === "media") return ["video", "image", "audio", "vector"]
++        if (tabId === "media") return ["video", "image", "vector"]
++        if (tabId === "audio") return ["audio"]
+         return []
+     }
+ 
+@@ -577,53 +578,34 @@ PanelFrame {
+     // evaluated. Labels are translated via tabLabels below.
+     property var tabLabels: ({
+         "media": qsTr("Media"),
+-        "market": qsTr("Market"),
+-        "text": qsTr("Text"),
+-        "subtitles": qsTr("Subtitles"),
+-        "stickers": qsTr("Stickers"),
+-        "shapes": qsTr("Shapes"),
+-        "scenes": qsTr("Scenes"),
+-        "masks": qsTr("Masks"),
+-        "effects": qsTr("Effects"),
+-        "templates": qsTr("Templates"),
+-        "transitions": qsTr("Transitions"),
+-        "sounds": qsTr("Audio FX"),
+-        "shortcuts": qsTr("Shortcuts")
++        "audio": qsTr("Audio"),
++        "text": qsTr("Texto"),
++        "subtitles": qsTr("Subtítulos"),
++        "transitions": qsTr("Transiciones"),
++        "animations": qsTr("Animaciones"),
++        "fish": qsTr("Fish Audio")
+     })
+-
+     // Rail order: project media → on-canvas graphics → processing → prefs.
+     // `separatorAfter` draws a hairline under the tab so groups read as sections.
+     // tabId "sounds" is kept for favorites persistence (settings key).
+     ListModel {
+         id: tabsModel
+         ListElement { tabId: "media"; icon: 0; separatorAfter: false }
+-        ListElement { tabId: "market"; icon: 12; separatorAfter: true }
+-        ListElement { tabId: "text"; icon: 1; separatorAfter: false }
+-        ListElement { tabId: "subtitles"; icon: 2; separatorAfter: false }
+-        ListElement { tabId: "stickers"; icon: 3; separatorAfter: false }
+-        ListElement { tabId: "shapes"; icon: 4; separatorAfter: false }
+-        ListElement { tabId: "masks"; icon: 11; separatorAfter: true }
+-        ListElement { tabId: "scenes"; icon: 10; separatorAfter: true }
+-        ListElement { tabId: "effects"; icon: 5; separatorAfter: false }
+-        ListElement { tabId: "templates"; icon: 6; separatorAfter: false }
+-        ListElement { tabId: "transitions"; icon: 7; separatorAfter: false }
+-        ListElement { tabId: "sounds"; icon: 8; separatorAfter: true }
+-        ListElement { tabId: "shortcuts"; icon: 9; separatorAfter: false }
++        ListElement { tabId: "audio"; icon: 1; separatorAfter: false }
++        ListElement { tabId: "text"; icon: 2; separatorAfter: false }
++        ListElement { tabId: "subtitles"; icon: 3; separatorAfter: false }
++        ListElement { tabId: "transitions"; icon: 4; separatorAfter: false }
++        ListElement { tabId: "animations"; icon: 5; separatorAfter: false }
++        ListElement { tabId: "fish"; icon: 6; separatorAfter: false }
+     }
+     property var tabIcons: [
+         Theme.icons.film,
++        Theme.icons.music,
+         Theme.icons.type,
+         Theme.icons.captions,
+-        Theme.icons.smile,
+-        Theme.icons.shapes,
+-        Theme.icons.wand,
+-        Theme.icons.layers,
+         Theme.icons.chevronsRight,
+-        Theme.icons.audioLines,
+-        Theme.icons.keyboard,
+-        Theme.icons.listVideo,
+-        Theme.icons.mask,
+-        Theme.icons.store
++        Theme.icons.sparkles,
++        Theme.icons.audioLines
+     ]
+     property int activeTab: 0
+ 
+@@ -964,6 +946,20 @@ PanelFrame {
+                 onAdded: root.addCompleted()
+             }
+ 
++            AnimationsTab {
++                visible: tabsModel.get(activeTab).tabId === "animations"
++                width: parent.width
++                opacity: root.tabOpacity
++                height: parent.height - Theme.panelHeaderHeight
++            }
++
++            FishAudioTab {
++                visible: tabsModel.get(activeTab).tabId === "fish"
++                width: parent.width
++                opacity: root.tabOpacity
++                height: parent.height - Theme.panelHeaderHeight
++            }
++
+             SoundsTab {
+                 visible: tabsModel.get(activeTab).tabId === "sounds"
+                 width: parent.width
+diff --git a/src/qml/Main.qml b/src/qml/Main.qml
+index 445e75b..93f569b 100644
+--- a/src/qml/Main.qml
++++ b/src/qml/Main.qml
+@@ -50,7 +50,7 @@ ApplicationWindow {
+     // Use visibility only — setting both this and `visible` makes Qt warn
+     // "Conflicting properties 'visible' and 'visibility'" (Maximized + hidden).
+     visibility: Window.Hidden
+-    title: "CutWire Drift"
++    title: "EGIPTO VIDEO STUDIO"
+     color: Theme.appBackground
+ 
+     LayoutMirroring.enabled: Qt.application.layoutDirection === Qt.RightToLeft
+diff --git a/src/qml/components/assets/AnimationsTab.qml b/src/qml/components/assets/AnimationsTab.qml
+new file mode 100644
+index 0000000..308d9aa
+--- /dev/null
++++ b/src/qml/components/assets/AnimationsTab.qml
+@@ -0,0 +1,142 @@
++import QtQuick
++import QtQuick.Controls.Basic
++import Drift
++import ".."
++import "../properties"
++
++Item {
++    id: root
++
++    property string randomStatus: ""
++    readonly property var randomKinds: [
++        "zoomIn", "zoomOut", "slideLeft", "slideRight", "slideUp", "slideDown", "pop", "bounce"
