@@ -1,0 +1,180 @@
++    ]
++
++    function randomizeAllVisualClips() {
++        const tracks = EditorState.tracks
++        let lastKind = ""
++        let changed = 0
++
++        for (let ti = 0; ti < tracks.length; ++ti) {
++            const track = tracks[ti]
++            const clips = track.clips || []
++            for (let ci = 0; ci < clips.length; ++ci) {
++                const clip = clips[ci]
++                if (clip.kind !== "video" && clip.kind !== "image")
++                    continue
++
++                let candidates = root.randomKinds.filter(function(kind) { return kind !== lastKind })
++                if (candidates.length === 0)
++                    candidates = root.randomKinds
++                const kind = candidates[Math.floor(Math.random() * candidates.length)]
++                lastKind = kind
++
++                const duration = Math.max(0.15, Math.min(0.55, (clip.duration || 1) / 3))
++                EditorState.setClipAnimation(ti, ci, "animIn",
++                                             { kind: kind, duration: duration, curve: "smooth" })
++                EditorState.setClipAnimation(ti, ci, "animOut",
++                                             { kind: "none", duration: duration, curve: "smooth" })
++                changed++
++            }
++        }
++
++        root.randomStatus = changed > 0
++                ? qsTr("%1 clips recibieron animaciones nativas de Drift.").arg(changed)
++                : qsTr("No hay clips visuales en la timeline.")
++    }
++
++    function clearAllVisualAnimations() {
++        const tracks = EditorState.tracks
++        let changed = 0
++        for (let ti = 0; ti < tracks.length; ++ti) {
++            const clips = tracks[ti].clips || []
++            for (let ci = 0; ci < clips.length; ++ci) {
++                const clip = clips[ci]
++                if (clip.kind !== "video" && clip.kind !== "image")
++                    continue
++                EditorState.setClipAnimation(ti, ci, "animIn", { kind: "none" })
++                EditorState.setClipAnimation(ti, ci, "animOut", { kind: "none" })
++                changed++
++            }
++        }
++        root.randomStatus = qsTr("Animaciones quitadas de %1 clips.").arg(changed)
++    }
++
++    Flickable {
++        anchors.fill: parent
++        contentWidth: width
++        contentHeight: contentColumn.height + Theme.spacing3xl
++        clip: true
++        boundsBehavior: Flickable.StopAtBounds
++        ScrollBar.vertical: AppScrollBar { }
++
++        Column {
++            id: contentColumn
++            x: Theme.pagePadding
++            width: parent.width - Theme.pagePadding * 2
++            topPadding: Theme.pagePadding
++            spacing: Theme.spacingXl
++
++            Text {
++                width: parent.width
++                wrapMode: Text.WordWrap
++                text: qsTr("Selecciona un clip en la timeline. Todo lo de esta pestaña usa el sistema de animaciones nativo de Drift.")
++                color: Theme.mutedForeground
++                font.family: Theme.fontFamily
++                font.pixelSize: Theme.fontSizeXs
++            }
++
++            AnimationInspector {
++                width: parent.width
++            }
++
++            Rectangle {
++                width: parent.width
++                height: Theme.borderWidth
++                color: Theme.panelBorder
++            }
++
++            Text {
++                width: parent.width
++                text: qsTr("Automatización")
++                color: Theme.panelForeground
++                font.family: Theme.fontFamily
++                font.pixelSize: Theme.fontSizeSm
++                font.weight: Font.Medium
++            }
++
++            Text {
++                width: parent.width
++                wrapMode: Text.WordWrap
++                text: qsTr("Asigna al azar animaciones propias de Drift a todos los clips de imagen/video y evita repetir la misma consecutivamente.")
++                color: Theme.mutedForeground
++                font.family: Theme.fontFamily
++                font.pixelSize: Theme.fontSizeXs
++            }
++
++            ThemedButton {
++                width: parent.width
++                text: qsTr("ALEATORIZAR EN TODOS LOS CLIPS")
++                variant: "primary"
++                onClicked: root.randomizeAllVisualClips()
++            }
++
++            ThemedButton {
++                width: parent.width
++                text: qsTr("QUITAR ANIMACIONES DE TODOS")
++                variant: "secondary"
++                onClicked: root.clearAllVisualAnimations()
++            }
++
++            Text {
++                visible: root.randomStatus.length > 0
++                width: parent.width
++                wrapMode: Text.WordWrap
++                text: root.randomStatus
++                color: Theme.mutedForeground
++                font.family: Theme.fontFamily
++                font.pixelSize: Theme.fontSizeXs
++            }
++        }
++    }
++}
+diff --git a/src/qml/components/assets/FishAudioTab.qml b/src/qml/components/assets/FishAudioTab.qml
+new file mode 100644
+index 0000000..20f172b
+--- /dev/null
++++ b/src/qml/components/assets/FishAudioTab.qml
+@@ -0,0 +1,264 @@
++import QtQuick
++import QtQuick.Controls.Basic
++import Drift
++import ".."
++
++Item {
++    id: root
++
++    Flickable {
++        anchors.fill: parent
++        contentWidth: width
++        contentHeight: fishColumn.height + Theme.spacing3xl
++        clip: true
++        boundsBehavior: Flickable.StopAtBounds
++        ScrollBar.vertical: AppScrollBar { }
++
++        Column {
++            id: fishColumn
++            x: Theme.pagePadding
++            width: parent.width - Theme.pagePadding * 2
++            topPadding: Theme.pagePadding
++            spacing: Theme.spacingLg
++
++            Text {
++                width: parent.width
++                text: qsTr("Fish Audio + timeline automática")
++                color: Theme.panelForeground
++                font.family: Theme.fontFamily
++                font.pixelSize: Theme.fontSizeBase
++                font.weight: Font.DemiBold
++            }
++
++            Text {
++                width: parent.width
++                wrapMode: Text.WordWrap
++                text: qsTr("Genera la voz, usa timestamps reales y acopla las imágenes/videos al guion. Fish no crea subtítulos.")
++                color: Theme.mutedForeground
++                font.family: Theme.fontFamily
++                font.pixelSize: Theme.fontSizeXs
++            }
++
++            Text {
++                text: qsTr("API Key")
++                color: Theme.mutedForeground
