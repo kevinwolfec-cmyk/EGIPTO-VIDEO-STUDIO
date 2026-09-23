@@ -40,7 +40,10 @@ jobs:
       - name: Apply EGIPTO patch
         shell: pwsh
         run: |
-          (Get-ChildItem egipto\patches\egipto-v0.1.patch.part* | Sort-Object Name | Get-Content) | Set-Content -Encoding utf8 egipto.patch
+          $parts = Get-ChildItem egipto\patches\egipto-v0.1.patch.part* | Sort-Object Name
+          $patch = ($parts | ForEach-Object { [System.IO.File]::ReadAllText($_.FullName) }) -join ''
+          $patch = $patch.Replace("`r`n", "`n")
+          [System.IO.File]::WriteAllText((Join-Path $PWD 'egipto.patch'), $patch, [System.Text.UTF8Encoding]::new($false))
           git -C drift apply --check ..\egipto.patch
           git -C drift apply ..\egipto.patch
           Write-Host 'EGIPTO patch applied to Drift v0.6.0'
