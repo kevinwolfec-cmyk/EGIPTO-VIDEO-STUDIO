@@ -1,0 +1,180 @@
++                font.family: Theme.fontFamily
++                font.pixelSize: Theme.fontSizeXs
++            }
++
++            ThemedTextField {
++                width: parent.width
++                echoMode: TextInput.Password
++                text: FishAudio.apiKey
++                placeholderText: qsTr("Fish Audio API Key")
++                onEditingFinished: FishAudio.apiKey = text.trim()
++            }
++
++            Row {
++                width: parent.width
++                spacing: Theme.spacingMd
++
++                ThemedButton {
++                    width: 112
++                    text: qsTr("Cargar voces")
++                    variant: "secondary"
++                    enabled: !FishAudio.busy
++                    onClicked: FishAudio.loadVoices()
++                }
++
++                ThemedComboBox {
++                    id: voiceBox
++                    width: parent.width - 112 - parent.spacing
++                    model: FishAudio.voices
++                    textRole: "title"
++                    valueRole: "id"
++                    enabled: !FishAudio.busy && count > 0
++                    onActivated: {
++                        if (currentValue !== undefined)
++                            FishAudio.referenceId = currentValue
++                    }
++                }
++            }
++
++            Text {
++                text: qsTr("Reference ID")
++                color: Theme.mutedForeground
++                font.family: Theme.fontFamily
++                font.pixelSize: Theme.fontSizeXs
++            }
++
++            ThemedTextField {
++                width: parent.width
++                text: FishAudio.referenceId
++                placeholderText: qsTr("ID de la voz Fish")
++                onEditingFinished: FishAudio.referenceId = text.trim()
++            }
++
++            Row {
++                width: parent.width
++                spacing: Theme.spacingMd
++
++                Column {
++                    width: (parent.width - parent.spacing) / 2
++                    spacing: Theme.spacingSm
++
++                    Text {
++                        text: qsTr("Modelo")
++                        color: Theme.mutedForeground
++                        font.family: Theme.fontFamily
++                        font.pixelSize: Theme.fontSizeXs
++                    }
++
++                    ThemedComboBox {
++                        width: parent.width
++                        model: ["s2-pro", "s2.1-pro", "s2.1-pro-free"]
++                        currentIndex: Math.max(0, model.indexOf(FishAudio.modelId))
++                        onActivated: FishAudio.modelId = currentText
++                    }
++                }
++
++                Column {
++                    width: (parent.width - parent.spacing) / 2
++                    spacing: Theme.spacingSm
++
++                    Text {
++                        text: qsTr("Velocidad")
++                        color: Theme.mutedForeground
++                        font.family: Theme.fontFamily
++                        font.pixelSize: Theme.fontSizeXs
++                    }
++
++                    ThemedNumberField {
++                        width: parent.width
++                        from: 0.5
++                        to: 1.8
++                        step: 0.05
++                        decimals: 2
++                        value: FishAudio.speed
++                        onEdited: v => FishAudio.speed = v
++                    }
++                }
++            }
++
++            Rectangle {
++                width: parent.width
++                height: Theme.borderWidth
++                color: Theme.panelBorder
++            }
++
++            Text {
++                text: qsTr("Guion original")
++                color: Theme.panelForeground
++                font.family: Theme.fontFamily
++                font.pixelSize: Theme.fontSizeSm
++                font.weight: Font.Medium
++            }
++
++            ThemedTextArea {
++                id: scriptField
++                width: parent.width
++                height: 210
++                placeholderText: qsTr("Pega aquí el guion original. La puntuación se usa para decidir los cortes visuales.")
++                wrapMode: TextEdit.Wrap
++            }
++
++            ThemedCheckBox {
++                width: parent.width
++                text: qsTr("Acoplar automáticamente imágenes/videos a los timestamps")
++                checked: FishAudio.autoPlaceMedia
++                onToggled: FishAudio.autoPlaceMedia = checked
++            }
++
++            Text {
++                width: parent.width
++                wrapMode: Text.WordWrap
++                text: qsTr("Los medios ya importados se ordenan por nombre. Si importas más después, ocuparán automáticamente el siguiente bloque Fish libre.")
++                color: Theme.mutedForeground
++                font.family: Theme.fontFamily
++                font.pixelSize: Theme.fontSizeXs
++            }
++
++            ThemedButton {
++                width: parent.width
++                text: FishAudio.busy
++                      ? qsTr("TRABAJANDO…")
++                      : qsTr("GENERAR VOZ + TIMELINE FISH")
++                variant: "primary"
++                enabled: !FishAudio.busy
++                onClicked: FishAudio.generateVoiceAndTimeline(scriptField.text)
++            }
++
++            ThemedButton {
++                width: parent.width
++                text: qsTr("ACOPLAR MEDIOS PENDIENTES")
++                variant: "secondary"
++                enabled: !FishAudio.busy && FishAudio.blocks.length > 0
++                onClicked: FishAudio.placeWaitingMedia()
++            }
++
++            Rectangle {
++                width: parent.width
++                height: Theme.borderWidth
++                color: Theme.panelBorder
++            }
++
++            Text {
++                width: parent.width
++                wrapMode: Text.WordWrap
++                text: FishAudio.status.length > 0 ? FishAudio.status : qsTr("Listo.")
++                color: FishAudio.errorString.length > 0 ? Theme.destructive : Theme.mutedForeground
++                font.family: Theme.fontFamily
++                font.pixelSize: Theme.fontSizeXs
++            }
++
++            Text {
++                visible: FishAudio.errorString.length > 0
++                width: parent.width
++                wrapMode: Text.WordWrap
++                text: FishAudio.errorString
++                color: Theme.destructive
++                font.family: Theme.fontFamily
++                font.pixelSize: Theme.fontSizeXs
++            }
++
++            Text {
