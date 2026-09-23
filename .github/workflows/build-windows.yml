@@ -1,0 +1,193 @@
+name: Build Windows · EGIPTO VIDEO STUDIO
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-windows.yml'
+      - 'patches/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  QT_VERSION: '6.10.3'
+  QT_MODULES: 'qtmultimedia qtimageformats'
+  FFMPEG_REPO: 'CutWire-Studios/FFmpeg-Builds'
+  FFMPEG_TAG: 'n7.1'
+  FETCHCONTENT_BASE_DIR: '${{ github.workspace }}/.deps'
+
+jobs:
+  windows:
+    name: Compilar EXE + portable
+    runs-on: windows-2022
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout EGIPTO build files
+        uses: actions/checkout@v4
+        with:
+          path: egipto
+
+      - name: Checkout Drift 0.6.0
+        uses: actions/checkout@v4
+        with:
+          repository: CutWire-Studios/Drift
+          ref: v0.6.0
+          path: drift
+
+      - name: Apply EGIPTO patch
+        shell: pwsh
+        run: |
+          (Get-ChildItem egipto\patches\egipto-v0.1.patch.part* | Sort-Object Name | Get-Content) | Set-Content -Encoding utf8 egipto.patch
+          git -C drift apply --check ..\egipto.patch
+          git -C drift apply ..\egipto.patch
+          Write-Host 'EGIPTO patch applied to Drift v0.6.0'
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: ${{ env.QT_MODULES }}
+          cache: true
+          add-tools-to-path: true
+
+      - name: Restore vcpkg binary cache
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: vcpkg_bincache
+          key: egipto-vcpkg-win-v1-${{ hashFiles('egipto/patches/**') }}
+          restore-keys: |
+            egipto-vcpkg-win-
+
+      - name: Install vcpkg dependencies
+        shell: pwsh
+        env:
+          VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg_bincache
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          if (-not (Test-Path vcpkg\vcpkg.exe)) {
+            git clone --depth 1 https://github.com/microsoft/vcpkg.git vcpkg
+            .\vcpkg\bootstrap-vcpkg.bat
+          }
+          .\vcpkg\vcpkg.exe install zstd openssl soundtouch --triplet x64-windows
+          .\vcpkg\vcpkg.exe install zlib "skia[gl,harfbuzz,icu,freetype,png]" --triplet x64-windows-static-md
+
+      - name: Save vcpkg binary cache
+        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg_bincache
+          key: egipto-vcpkg-win-v1-${{ hashFiles('egipto/patches/**') }}
+
+      - name: Cache FetchContent dependencies
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: egipto-deps-win-v1-${{ hashFiles('egipto/patches/**') }}
+
+      - name: Fetch pinned FFmpeg
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force .deps\ffmpeg, .deps\ffmpeg_extracted -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path .deps\ffmpeg | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/$env:FFMPEG_REPO/releases/download/$env:FFMPEG_TAG/ffmpeg-$env:FFMPEG_TAG-win64-gpl-shared.zip" -OutFile ffmpeg.zip
+          Expand-Archive -Path ffmpeg.zip -DestinationPath .deps\ffmpeg_extracted -Force
+          $root = (Get-ChildItem .deps\ffmpeg_extracted)[0].FullName
+          Copy-Item -Path "$root\*" -Destination .deps\ffmpeg -Recurse -Force
+
+      - name: Configure
+        shell: pwsh
+        working-directory: drift
+        run: |
+          cmake -B build -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}\vcpkg\scripts\buildsystems\vcpkg.cmake `
+            -DCMAKE_PREFIX_PATH="${{ env.QT_ROOT_DIR }};${{ github.workspace }}\.deps\ffmpeg;${{ github.workspace }}\vcpkg\installed\x64-windows-static-md" `
+            -DFETCHCONTENT_BASE_DIR=${{ env.FETCHCONTENT_BASE_DIR }} `
+            -DZLIB_INCLUDE_DIR=${{ github.workspace }}\vcpkg\installed\x64-windows-static-md\include `
+            -DZLIB_LIBRARY=${{ github.workspace }}\vcpkg\installed\x64-windows-static-md\lib\zs.lib `
+            -DDRIFT_BUNDLE_ONNXRUNTIME=OFF `
+            -DDRIFT_WITH_SKIA=ON
+
+      - name: Build
+        shell: pwsh
+        working-directory: drift
+        run: cmake --build build --config Release --parallel 2
+
+      - name: Run Drift tests
+        shell: pwsh
+        working-directory: drift
+        env:
+          QT_FORCE_STDERR_LOGGING: '1'
+        run: |
+          $env:PATH = "${{ github.workspace }}\.deps\ffmpeg\bin;${{ env.QT_ROOT_DIR }}\bin;$env:PATH"
+          ctest --test-dir build -C Release --output-on-failure
+
+      - name: Stage portable runtime
+        shell: pwsh
+        working-directory: drift
+        run: |
+          New-Item -ItemType Directory -Force -Path 'dist\bin' | Out-Null
+          Copy-Item 'build\Release\drift.exe' 'dist\bin\EGIPTO VIDEO STUDIO.exe' -Force
+          & "${{ env.QT_ROOT_DIR }}\bin\windeployqt.exe" --release --no-translations --no-opengl-sw --qmldir src\qml 'dist\bin\EGIPTO VIDEO STUDIO.exe'
+          Copy-Item '${{ github.workspace }}\vcpkg\installed\x64-windows\bin\*.dll' dist\bin -Force
+          Copy-Item '${{ github.workspace }}\.deps\ffmpeg\bin\*.dll' dist\bin -Force
+          foreach ($dir in 'effects', 'transitions', 'effect-templates', 'audio-effects') {
+            Copy-Item "build\Release\$dir" dist\bin -Recurse -Force
+          }
+
+      - name: Verify packaged executable exists
+        shell: pwsh
+        working-directory: drift
+        run: |
+          if (-not (Test-Path 'dist\bin\EGIPTO VIDEO STUDIO.exe')) {
+            throw 'EGIPTO VIDEO STUDIO.exe was not created'
+          }
+          $exe = Get-Item 'dist\bin\EGIPTO VIDEO STUDIO.exe'
+          Write-Host "EXE OK: $($exe.FullName) · $([math]::Round($exe.Length / 1MB, 2)) MB"
+          if (-not (Test-Path 'dist\bin\platforms\qwindows.dll')) {
+            throw 'Qt qwindows.dll was not deployed'
+          }
+
+      - name: Build portable ZIP
+        shell: pwsh
+        working-directory: drift
+        run: |
+          New-Item -ItemType Directory -Force -Path 'portable\EGIPTO VIDEO STUDIO', 'dist\portable' | Out-Null
+          Copy-Item dist\bin\* 'portable\EGIPTO VIDEO STUDIO' -Recurse -Force
+          & "$env:ProgramFiles\7-Zip\7z.exe" a -tzip -mx=7 'dist\portable\EGIPTO-VIDEO-STUDIO-Portable-v0.1-x64.zip' '.\portable\EGIPTO VIDEO STUDIO'
+
+      - name: Build Windows installer
+        uses: Minionguyjpro/Inno-Setup-Action@v1.2.6
+        with:
+          path: drift/installer/windows/Drift.iss
+          options: |
+            /DMyAppVersion=0.1.${{ github.run_number }}
+            /DMyAppSource=${{ github.workspace }}\drift\dist\bin
+
+      - name: Collect installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path drift\dist | Out-Null
+          Copy-Item drift\installer\windows\output\EGIPTO-VIDEO-STUDIO-Setup-x64.exe `
+            drift\dist\EGIPTO-VIDEO-STUDIO-Setup-v0.1-${{ github.run_number }}-x64.exe -Force
+
+      - name: Upload portable
+        uses: actions/upload-artifact@v4
+        with:
+          name: EGIPTO-VIDEO-STUDIO-Portable-v0.1
+          path: drift/dist/portable/*.zip
+          if-no-files-found: error
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: EGIPTO-VIDEO-STUDIO-Setup-v0.1
+          path: drift/dist/EGIPTO-VIDEO-STUDIO-Setup-*.exe
+          if-no-files-found: error
