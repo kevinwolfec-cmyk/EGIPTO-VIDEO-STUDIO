@@ -1,0 +1,40 @@
++                visible: FishAudio.blocks.length > 0
++                width: parent.width
++                text: qsTr("Bloques Fish · %1").arg(FishAudio.blocks.length)
++                color: Theme.panelForeground
++                font.family: Theme.fontFamily
++                font.pixelSize: Theme.fontSizeSm
++                font.weight: Font.Medium
++            }
++
++            Repeater {
++                model: FishAudio.blocks
++
++                delegate: Rectangle {
++                    required property var modelData
++                    width: fishColumn.width
++                    height: blockText.implicitHeight + Theme.spacingLg * 2
++                    radius: Theme.radiusSm
++                    color: Theme.panelAccent
++                    border.width: Theme.borderWidth
++                    border.color: Theme.panelBorder
++
++                    Text {
++                        id: blockText
++                        anchors.fill: parent
++                        anchors.margins: Theme.spacingLg
++                        wrapMode: Text.WordWrap
++                        text: "%1  %2 → %3\n%4"
++                              .arg(String(modelData.index + 1).padStart(2, "0"))
++                              .arg(Number(modelData.start).toFixed(3))
++                              .arg(Number(modelData.end).toFixed(3))
++                              .arg(modelData.text)
++                        color: Theme.panelForeground
++                        font.family: Theme.monoFontFamily
++                        font.pixelSize: Theme.fontSizeXs
++                    }
++                }
++            }
++        }
++    }
++}
