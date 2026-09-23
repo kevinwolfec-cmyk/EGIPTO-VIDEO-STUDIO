@@ -1,0 +1,470 @@
++
++void FishAudioController::consumeSse()
++{
++    for (;;) {
++        const int newline = m_sseBuffer.indexOf('\n');
++        if (newline < 0)
++            break;
++        QByteArray line = m_sseBuffer.left(newline);
++        m_sseBuffer.remove(0, newline + 1);
++        if (line.endsWith('\r'))
++            line.chop(1);
++        processSseLine(line);
++    }
++}
++
++void FishAudioController::processSseLine(const QByteArray &line)
++{
++    if (!line.startsWith("data:"))
++        return;
++
++    const QByteArray json = line.mid(5).trimmed();
++    if (json.isEmpty() || json == "[DONE]")
++        return;
++
++    const QJsonDocument document = QJsonDocument::fromJson(json);
++    if (!document.isObject())
++        return;
++
++    const QJsonObject event = document.object();
++    const QString audio64 = event.value(QStringLiteral("audio_base64")).toString();
++    if (!audio64.isEmpty())
++        m_audioBytes += QByteArray::fromBase64(audio64.toUtf8());
++
++    const double offset = event.value(QStringLiteral("chunk_audio_offset_sec")).toDouble();
++    const QJsonObject alignment = event.value(QStringLiteral("alignment")).toObject();
++    const QJsonArray segments = alignment.value(QStringLiteral("segments")).toArray();
++
++    QList<Segment> currentChunk;
++    for (const QJsonValue &value : segments) {
++        const QJsonObject item = value.toObject();
++        Segment segment;
++        segment.text = collapseSpaces(item.value(QStringLiteral("text")).toString());
++        segment.start = offset + item.value(QStringLiteral("start")).toDouble();
++        segment.end = offset + item.value(QStringLiteral("end")).toDouble();
++        if (!segment.text.isEmpty() && segment.end > segment.start)
++            currentChunk.append(segment);
++    }
++
++    if (!currentChunk.isEmpty()) {
++        if (event.contains(QStringLiteral("chunk_seq"))) {
++            const int chunk = event.value(QStringLiteral("chunk_seq")).toInt();
++            m_segmentsByChunk.insert(chunk, currentChunk);
++        } else {
++            m_segments.append(currentChunk);
++        }
++    }
++}
++
++void FishAudioController::finishVoiceRequest()
++{
++    if (m_audioBytes.isEmpty()) {
++        fail(tr("Fish Audio no devolvió audio."));
++        return;
++    }
++
++    if (!m_segmentsByChunk.isEmpty()) {
++        m_segments.clear();
++        for (auto it = m_segmentsByChunk.cbegin(); it != m_segmentsByChunk.cend(); ++it)
++            m_segments.append(it.value());
++    }
++
++    if (m_segments.isEmpty()) {
++        fail(tr("Fish generó audio, pero no devolvió timestamps utilizables."));
++        return;
++    }
++
++    std::sort(m_segments.begin(), m_segments.end(), [](const Segment &a, const Segment &b) {
++        if (!qFuzzyCompare(a.start, b.start))
++            return a.start < b.start;
++        return a.end < b.end;
++    });
++
++    const QList<SceneBlock> scenes = buildSceneBlocks(m_script, m_segments);
++    if (scenes.isEmpty()) {
++        fail(tr("No pude construir los bloques visuales del guion."));
++        return;
++    }
++
++    QVariantList exposed;
++    for (int i = 0; i < scenes.size(); ++i) {
++        QVariantMap row;
++        row.insert(QStringLiteral("index"), i);
++        row.insert(QStringLiteral("start"), scenes[i].start);
++        row.insert(QStringLiteral("end"), scenes[i].end);
++        row.insert(QStringLiteral("duration"), scenes[i].end - scenes[i].start);
++        row.insert(QStringLiteral("text"), scenes[i].text);
++        exposed.append(row);
++    }
++    m_blocks = exposed;
++    emit blocksChanged();
++
++    const QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
++    QDir dir(base);
++    if (!dir.mkpath(QStringLiteral("fish-audio"))) {
++        fail(tr("No pude crear la carpeta local de Fish Audio."));
++        return;
++    }
++    dir.cd(QStringLiteral("fish-audio"));
++
++    const QString stamp = QString::number(QDateTime::currentMSecsSinceEpoch());
++    m_outputAudioPath = dir.filePath(QStringLiteral("fish_voice_%1.mp3").arg(stamp));
++
++    QFile file(m_outputAudioPath);
++    if (!file.open(QIODevice::WriteOnly) || file.write(m_audioBytes) != m_audioBytes.size()) {
++        fail(tr("No pude guardar el audio generado."));
++        return;
++    }
++    file.close();
++
++    const double audioDuration = m_segments.constLast().end;
++    importAndPlaceVoice(m_outputAudioPath, audioDuration);
++
++    setBusy(false);
++    setStatus(tr("Voz lista · %1 bloques · ajustando medios…").arg(m_blocks.size()));
++    emit generationFinished(m_outputAudioPath, m_blocks.size());
++
++    if (m_autoPlaceMedia)
++        scheduleAutoPlacement();
++}
++
++void FishAudioController::resetNetworkState()
++{
++    if (!m_reply)
++        return;
++    disconnect(m_reply, nullptr, this, nullptr);
++    m_reply->abort();
++    m_reply->deleteLater();
++    m_reply = nullptr;
++}
++
++QString FishAudioController::normalizeWord(const QString &value)
++{
++    const QString decomposed = value.normalized(QString::NormalizationForm_D).toLower();
++    QString filtered;
++    filtered.reserve(decomposed.size());
++
++    for (const QChar ch : decomposed) {
++        if (ch.category() == QChar::Mark_NonSpacing)
++            continue;
++        if (ch.isLetterOrNumber() || ch == QLatin1Char('_'))
++            filtered.append(ch);
++    }
++    return filtered;
++}
++
++QList<FishAudioController::Word> FishAudioController::tokenizeOriginal(const QString &text)
++{
++    QList<Word> words;
++    static const QRegularExpression rx(
++        QStringLiteral(R"([\p{L}\p{N}_]+(?:['’\-][\p{L}\p{N}_]+)*)"));
++
++    auto it = rx.globalMatch(text);
++    while (it.hasNext()) {
++        const QRegularExpressionMatch match = it.next();
++        Word word;
++        word.raw = match.captured();
++        word.norm = normalizeWord(word.raw);
++        word.charStart = match.capturedStart();
++        word.charEnd = match.capturedEnd();
++        if (!word.norm.isEmpty())
++            words.append(word);
++    }
++    return words;
++}
++
++QList<FishAudioController::Word> FishAudioController::timedWords(const QList<Segment> &segments)
++{
++    QList<Word> words;
++    static const QRegularExpression rx(
++        QStringLiteral(R"([\p{L}\p{N}_]+(?:['’\-][\p{L}\p{N}_]+)*)"));
++
++    for (const Segment &segment : segments) {
++        QList<QPair<QString, QString>> local;
++        auto it = rx.globalMatch(segment.text);
++        while (it.hasNext()) {
++            const QString raw = it.next().captured();
++            const QString norm = normalizeWord(raw);
++            if (!norm.isEmpty())
++                local.append({raw, norm});
++        }
++        if (local.isEmpty())
++            continue;
++
++        int totalWeight = 0;
++        for (const auto &pair : local)
++            totalWeight += qMax(1, pair.second.size());
++
++        double cursor = segment.start;
++        int remainingWeight = totalWeight;
++        double remainingDuration = segment.end - segment.start;
++
++        for (int i = 0; i < local.size(); ++i) {
++            const int weight = qMax(1, local[i].second.size());
++            const double end = (i == local.size() - 1)
++                ? segment.end
++                : cursor + remainingDuration * (double(weight) / qMax(1, remainingWeight));
++
++            Word word;
++            word.raw = local[i].first;
++            word.norm = local[i].second;
++            word.start = cursor;
++            word.end = end;
++            words.append(word);
++
++            remainingDuration = qMax(0.0, segment.end - end);
++            remainingWeight -= weight;
++            cursor = end;
++        }
++    }
++    return words;
++}
++
++double FishAudioController::alignWords(QList<Word> &original, const QList<Word> &timed)
++{
++    if (original.isEmpty() || timed.isEmpty())
++        return 0.0;
++
++    const int n = original.size();
++    const int m = timed.size();
++    QVector<QVector<int>> dp(n + 1, QVector<int>(m + 1, 0));
++
++    for (int i = n - 1; i >= 0; --i) {
++        for (int j = m - 1; j >= 0; --j) {
++            if (original[i].norm == timed[j].norm)
++                dp[i][j] = dp[i + 1][j + 1] + 1;
++            else
++                dp[i][j] = qMax(dp[i + 1][j], dp[i][j + 1]);
++        }
++    }
++
++    QList<int> matched;
++    int i = 0;
++    int j = 0;
++    while (i < n && j < m) {
++        if (original[i].norm == timed[j].norm) {
++            original[i].start = timed[j].start;
++            original[i].end = timed[j].end;
++            matched.append(i);
++            ++i;
++            ++j;
++        } else if (dp[i + 1][j] >= dp[i][j + 1]) {
++            ++i;
++        } else {
++            ++j;
++        }
++    }
++
++    if (matched.isEmpty())
++        return 0.0;
++
++    auto fillGap = [&original](int from, int to, double start, double end) {
++        if (from >= to)
++            return;
++
++        int totalWeight = 0;
++        for (int k = from; k < to; ++k)
++            totalWeight += qMax(1, original[k].norm.size());
++
++        double cursor = start;
++        int remainingWeight = totalWeight;
++        double remaining = qMax(0.001, end - start);
++
++        for (int k = from; k < to; ++k) {
++            const int weight = qMax(1, original[k].norm.size());
++            const double next = (k == to - 1)
++                ? end
++                : cursor + remaining * (double(weight) / qMax(1, remainingWeight));
++
++            original[k].start = cursor;
++            original[k].end = next;
++            remaining = qMax(0.0, end - next);
++            remainingWeight -= weight;
++            cursor = next;
++        }
++    };
++
++    const int first = matched.first();
++    if (first > 0)
++        fillGap(0, first, 0.0, original[first].start);
++
++    for (int k = 0; k + 1 < matched.size(); ++k) {
++        const int left = matched[k];
++        const int right = matched[k + 1];
++        fillGap(left + 1, right, original[left].end, original[right].start);
++    }
++
++    const int last = matched.last();
++    if (last < n - 1)
++        fillGap(last + 1, n, original[last].end, timed.constLast().end);
++
++    return double(matched.size()) / qMax(1, n);
++}
++
++QList<QPair<int,int>> FishAudioController::sentenceRanges(const QString &text, const QList<Word> &words)
++{
++    QList<QPair<int,int>> ranges;
++    if (words.isEmpty())
++        return ranges;
++
++    static const QRegularExpression sentenceEnd(
++        QStringLiteral(R"([.!?…]+(?:["»”’\)\]]+)?)"));
++
++    auto it = sentenceEnd.globalMatch(text);
++    int begin = 0;
++
++    while (it.hasNext()) {
++        const int boundary = it.next().capturedEnd();
++        int end = begin;
++        while (end < words.size() && words[end].charEnd <= boundary)
++            ++end;
++
++        if (end > begin) {
++            ranges.append({begin, end});
++            begin = end;
++        }
++    }
++
++    if (begin < words.size())
++        ranges.append({begin, words.size()});
++    return ranges;
++}
++
++QString FishAudioController::textForRange(
++    const QString &text, const QList<Word> &words, int begin, int end)
++{
++    if (begin < 0 || end <= begin || end > words.size())
++        return {};
++
++    int charBegin = words[begin].charStart;
++    int charEnd = words[end - 1].charEnd;
++
++    while (charEnd < text.size()) {
++        const QChar ch = text.at(charEnd);
++        if (ch.isSpace())
++            break;
++        if (ch.isPunct() || ch == QChar(0x2026))
++            ++charEnd;
++        else
++            break;
++    }
++
++    return text.mid(charBegin, charEnd - charBegin).trimmed();
++}
++
++FishAudioController::SceneBlock FishAudioController::blockForRange(
++    const QString &text, const QList<Word> &words, int begin, int end)
++{
++    SceneBlock block;
++    if (begin < 0 || end <= begin || end > words.size())
++        return block;
++
++    block.start = qMax(0.0, words[begin].start);
++    block.end = qMax(block.start + 0.01, words[end - 1].end);
++    block.text = textForRange(text, words, begin, end);
++    return block;
++}
++
++QList<FishAudioController::SceneBlock> FishAudioController::splitRange(
++    const QString &text, const QList<Word> &words, int begin, int end)
++{
++    const SceneBlock whole = blockForRange(text, words, begin, end);
++    if (whole.text.isEmpty())
++        return {};
++    if (durationOf(whole.start, whole.end) <= kHardMax)
++        return {whole};
++
++    int bestSplit = -1;
++    double bestScore = -1e9;
++
++    for (int split = begin + 2; split <= end - 2; ++split) {
++        const SceneBlock left = blockForRange(text, words, begin, split);
++        const SceneBlock right = blockForRange(text, words, split, end);
++        const double ld = durationOf(left.start, left.end);
++        const double rd = durationOf(right.start, right.end);
++
++        if (ld < 1.3 || rd < 1.3)
++            continue;
++
++        const QString between = text.mid(
++            words[split - 1].charEnd,
++            words[split].charStart - words[split - 1].charEnd);
++
++        double semantic = 0.0;
++        if (between.contains(QLatin1Char(';')) || between.contains(QLatin1Char(':')))
++            semantic = 5.0;
++        else if (between.contains(QLatin1Char(',')) || between.contains(QChar(0x2014))
++                 || between.contains(QChar(0x2013)))
++            semantic = 4.0;
++
++        const QString token = words[split].norm;
++        if (token == QStringLiteral("pero") || token == QStringLiteral("entonces")
++            || token == QStringLiteral("despues") || token == QStringLiteral("luego")
++            || token == QStringLiteral("aunque") || token == QStringLiteral("finalmente"))
++            semantic = qMax(semantic, 3.0);
++
++        const bool targetGood = ld >= kMinScene && ld <= kPreferredMax
++                             && rd >= kMinScene && rd <= kPreferredMax;
++        const bool hardGood = ld <= kHardMax && rd <= kHardMax;
++        const double targetPenalty = qAbs(ld - kTargetScene) + qAbs(rd - kTargetScene);
++        const double balancePenalty = qAbs(ld - rd);
++
++        const double score = semantic * 100.0
++                           + (targetGood ? 40.0 : 0.0)
++                           + (hardGood ? 20.0 : 0.0)
++                           - targetPenalty * 4.0
++                           - balancePenalty;
++
++        if (score > bestScore) {
++            bestScore = score;
++            bestSplit = split;
++        }
++    }
++
++    if (bestSplit < 0) {
++        const double midpoint = (whole.start + whole.end) * 0.5;
++        double bestDistance = 1e9;
++
++        for (int split = begin + 2; split <= end - 2; ++split) {
++            const SceneBlock left = blockForRange(text, words, begin, split);
++            const SceneBlock right = blockForRange(text, words, split, end);
++            if (durationOf(left.start, left.end) < 1.5
++                    || durationOf(right.start, right.end) < 1.5)
++                continue;
++
++            const double point = (left.end + right.start) * 0.5;
++            const double distance = qAbs(point - midpoint);
++            if (distance < bestDistance) {
++                bestDistance = distance;
++                bestSplit = split;
++            }
++        }
++    }
++
++    if (bestSplit < 0)
++        return {whole};
++
++    QList<SceneBlock> out = splitRange(text, words, begin, bestSplit);
++    out.append(splitRange(text, words, bestSplit, end));
++    return out;
++}
++
++QList<FishAudioController::SceneBlock> FishAudioController::mergeShort(
++    const QList<SceneBlock> &blocks)
++{
++    if (blocks.isEmpty())
++        return {};
++
++    QList<SceneBlock> result;
++    result.append(blocks.first());
++
++    for (int i = 1; i < blocks.size(); ++i) {
++        const SceneBlock current = blocks[i];
++        SceneBlock &previous = result.last();
++
++        const double pd = durationOf(previous.start, previous.end);
++        const double cd = durationOf(current.start, current.end);
++        const double mergedDuration = current.end - previous.start;
++
++        if ((pd < kMinScene || cd < kMinScene)
++                && mergedDuration <= kPreferredMax + 0.35) {
