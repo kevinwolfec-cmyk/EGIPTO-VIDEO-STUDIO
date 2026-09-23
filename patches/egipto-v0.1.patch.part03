@@ -1,0 +1,180 @@
++
++    const QString kind = asset.value(QStringLiteral("kind")).toString();
++    if (kind != QStringLiteral("image") && kind != QStringLiteral("video"))
++        return false;
++
++    const QVariantMap block = m_blocks[blockIndex].toMap();
++    const double start = block.value(QStringLiteral("start")).toDouble();
++    const double duration = block.value(QStringLiteral("duration")).toDouble();
++    if (!(duration > 0.0))
++        return false;
++
++    const int track = ensureNamedTrack(QStringLiteral("video"), QStringLiteral("Visual Fish"));
++    if (track < 0)
++        return false;
++
++    m_editor->addClipFromAssetAt(assetIndex, track, start);
++    if (m_editor->selectedTrack() != track || m_editor->selectedClip() < 0)
++        return false;
++
++    const int clip = m_editor->selectedClip();
++    m_editor->setClipStart(track, clip, start);
++    m_editor->setClipDuration(track, clip, duration);
++
++    m_placedVisualAssetIds.insert(assetId);
++    return true;
++}
++
++void FishAudioController::autoPlaceAvailableMedia()
++{
++    if (!m_autoPlaceMedia || m_blocks.isEmpty() || m_nextMediaSlot >= m_blocks.size())
++        return;
++
++    const QList<int> assets = visualAssetIndexesInNaturalOrder();
++    bool advanced = false;
++
++    for (const int assetIndex : assets) {
++        if (m_nextMediaSlot >= m_blocks.size())
++            break;
++
++        const QVariantMap asset = m_assets->assetAt(assetIndex);
++        const QString id = asset.value(QStringLiteral("id")).toString();
++        if (id.isEmpty() || m_placedVisualAssetIds.contains(id))
++            continue;
++        if (m_assets->isImportPending(id))
++            continue;
++
++        if (placeVisualAsset(assetIndex, m_nextMediaSlot)) {
++            ++m_nextMediaSlot;
++            advanced = true;
++            emit nextMediaSlotChanged();
++        }
++    }
++
++    if (m_nextMediaSlot >= m_blocks.size()) {
++        setStatus(tr("Timeline Fish completa: %1/%1 medios ajustados a timestamps.")
++                      .arg(m_blocks.size()));
++    } else if (advanced) {
++        setStatus(tr("Medios Fish: %1/%2 colocados. Los próximos imports se acoplarán automáticamente.")
++                      .arg(m_nextMediaSlot)
++                      .arg(m_blocks.size()));
++    }
++}
++
++void FishAudioController::placeWaitingMedia()
++{
++    autoPlaceAvailableMedia();
++}
+diff --git a/src/models/FishAudioController.h b/src/models/FishAudioController.h
+new file mode 100644
+index 0000000..44fa61a
+--- /dev/null
++++ b/src/models/FishAudioController.h
+@@ -0,0 +1,152 @@
++#pragma once
++
++#include <QObject>
++#include <QByteArray>
++#include <QSet>
++#include <QMap>
++#include <QString>
++#include <QVariantList>
++
++class AppController;
++class AssetLibrary;
++class QNetworkAccessManager;
++class QNetworkReply;
++
++class FishAudioController : public QObject
++{
++    Q_OBJECT
++    Q_PROPERTY(QString apiKey READ apiKey WRITE setApiKey NOTIFY apiKeyChanged)
++    Q_PROPERTY(QString referenceId READ referenceId WRITE setReferenceId NOTIFY referenceIdChanged)
++    Q_PROPERTY(QString modelId READ modelId WRITE setModelId NOTIFY modelIdChanged)
++    Q_PROPERTY(double speed READ speed WRITE setSpeed NOTIFY speedChanged)
++    Q_PROPERTY(bool autoPlaceMedia READ autoPlaceMedia WRITE setAutoPlaceMedia NOTIFY autoPlaceMediaChanged)
++    Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
++    Q_PROPERTY(QString status READ status NOTIFY statusChanged)
++    Q_PROPERTY(QString errorString READ errorString NOTIFY errorStringChanged)
++    Q_PROPERTY(QVariantList voices READ voices NOTIFY voicesChanged)
++    Q_PROPERTY(QVariantList blocks READ blocks NOTIFY blocksChanged)
++    Q_PROPERTY(int nextMediaSlot READ nextMediaSlot NOTIFY nextMediaSlotChanged)
++
++public:
++    explicit FishAudioController(AssetLibrary *assets, AppController *editor, QObject *parent = nullptr);
++    ~FishAudioController() override;
++
++    QString apiKey() const { return m_apiKey; }
++    void setApiKey(const QString &value);
++    QString referenceId() const { return m_referenceId; }
++    void setReferenceId(const QString &value);
++    QString modelId() const { return m_modelId; }
++    void setModelId(const QString &value);
++    double speed() const { return m_speed; }
++    void setSpeed(double value);
++    bool autoPlaceMedia() const { return m_autoPlaceMedia; }
++    void setAutoPlaceMedia(bool value);
++
++    bool busy() const { return m_busy; }
++    QString status() const { return m_status; }
++    QString errorString() const { return m_errorString; }
++    QVariantList voices() const { return m_voices; }
++    QVariantList blocks() const { return m_blocks; }
++    int nextMediaSlot() const { return m_nextMediaSlot; }
++
++    Q_INVOKABLE void loadVoices();
++    Q_INVOKABLE void generateVoiceAndTimeline(const QString &script);
++    Q_INVOKABLE void placeWaitingMedia();
++    Q_INVOKABLE void clearError();
++
++signals:
++    void apiKeyChanged();
++    void referenceIdChanged();
++    void modelIdChanged();
++    void speedChanged();
++    void autoPlaceMediaChanged();
++    void busyChanged();
++    void statusChanged();
++    void errorStringChanged();
++    void voicesChanged();
++    void blocksChanged();
++    void nextMediaSlotChanged();
++    void generationFinished(const QString &audioPath, int blockCount);
++
++private:
++    struct Segment {
++        QString text;
++        double start = 0.0;
++        double end = 0.0;
++    };
++    struct Word {
++        QString raw;
++        QString norm;
++        int charStart = 0;
++        int charEnd = 0;
++        double start = -1.0;
++        double end = -1.0;
++    };
++    struct SceneBlock {
++        double start = 0.0;
++        double end = 0.0;
++        QString text;
++    };
++
++    void setBusy(bool value);
++    void setStatus(const QString &value);
++    void fail(const QString &message);
++    void saveSettings();
++
++    void startVoiceRequest(const QString &script);
++    void consumeSse();
++    void processSseLine(const QByteArray &line);
++    void finishVoiceRequest();
++    void resetNetworkState();
++
++    QList<SceneBlock> buildSceneBlocks(const QString &original, const QList<Segment> &segments) const;
++    static QString normalizeWord(const QString &value);
++    static QList<Word> tokenizeOriginal(const QString &text);
++    static QList<Word> timedWords(const QList<Segment> &segments);
++    static double alignWords(QList<Word> &original, const QList<Word> &timed);
++    static QList<QPair<int,int>> sentenceRanges(const QString &text, const QList<Word> &words);
