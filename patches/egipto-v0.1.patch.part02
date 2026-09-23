@@ -1,0 +1,180 @@
++            previous.end = current.end;
++            previous.text = collapseSpaces(previous.text + QLatin1Char(' ') + current.text);
++        } else {
++            result.append(current);
++        }
++    }
++    return result;
++}
++
++QList<FishAudioController::SceneBlock> FishAudioController::applyPreroll(
++    const QList<SceneBlock> &blocks, double prerollSeconds)
++{
++    if (blocks.isEmpty())
++        return {};
++
++    QList<SceneBlock> out = blocks;
++    out[0].start = qMax(0.0, out[0].start);
++
++    for (int i = 1; i < out.size(); ++i) {
++        const double shifted = qMax(
++            out[i - 1].start + 0.35,
++            qMax(0.0, out[i].start - prerollSeconds));
++        const double safe = qMin(shifted, out[i].end - 0.05);
++
++        out[i - 1].end = qMax(out[i - 1].start + 0.05, safe);
++        out[i].start = out[i - 1].end;
++    }
++
++    for (SceneBlock &block : out)
++        block.end = qMax(block.start + 0.05, block.end);
++
++    return out;
++}
++
++QList<FishAudioController::SceneBlock> FishAudioController::buildSceneBlocks(
++    const QString &original, const QList<Segment> &segments) const
++{
++    QList<Word> source = tokenizeOriginal(original);
++    const QList<Word> timing = timedWords(segments);
++    const double confidence = alignWords(source, timing);
++
++    if (source.isEmpty() || timing.isEmpty() || confidence < 0.45)
++        return {};
++
++    QList<SceneBlock> result;
++    const auto ranges = sentenceRanges(original, source);
++    for (const auto &range : ranges)
++        result.append(splitRange(original, source, range.first, range.second));
++
++    result = mergeShort(result);
++    return applyPreroll(result, 0.100);
++}
++
++int FishAudioController::findTrack(const QString &type, const QString &name) const
++{
++    if (!m_editor)
++        return -1;
++
++    const QVariantList tracks = m_editor->tracks();
++    for (int i = 0; i < tracks.size(); ++i) {
++        const QVariantMap track = tracks[i].toMap();
++        if (track.value(QStringLiteral("type")).toString() != type)
++            continue;
++        if (!name.isEmpty() && track.value(QStringLiteral("name")).toString() != name)
++            continue;
++        return i;
++    }
++    return -1;
++}
++
++int FishAudioController::ensureNamedTrack(const QString &type, const QString &name)
++{
++    int track = findTrack(type, name);
++    if (track >= 0)
++        return track;
++    if (!m_editor)
++        return -1;
++
++    const int before = m_editor->tracks().size();
++    m_editor->addTrack(type);
++    const QVariantList after = m_editor->tracks();
++    if (after.size() <= before)
++        return -1;
++
++    track = after.size() - 1;
++    m_editor->renameTrack(track, name);
++    return track;
++}
++
++void FishAudioController::importAndPlaceVoice(const QString &path, double durationSeconds)
++{
++    if (!m_assets || !m_editor)
++        return;
++
++    const QStringList ids = m_assets->importLocalPaths({path});
++    if (ids.isEmpty()) {
++        m_errorString = tr("La voz se generó, pero Drift no pudo importarla.");
++        emit errorStringChanged();
++        return;
++    }
++
++    m_pendingVoiceAssetId = ids.first();
++    m_pendingVoiceDuration = durationSeconds;
++    tryPlacePendingVoice();
++}
++
++void FishAudioController::tryPlacePendingVoice()
++{
++    if (m_pendingVoiceAssetId.isEmpty() || !m_assets || !m_editor)
++        return;
++    if (m_assets->isImportPending(m_pendingVoiceAssetId))
++        return;
++
++    const int assetIndex = m_assets->indexOfId(m_pendingVoiceAssetId);
++    if (assetIndex < 0)
++        return;
++
++    const int track = ensureNamedTrack(QStringLiteral("audio"), QStringLiteral("Voz Fish"));
++    if (track < 0)
++        return;
++
++    m_editor->addClipFromAssetAt(assetIndex, track, 0.0);
++    if (m_editor->selectedTrack() == track && m_editor->selectedClip() >= 0) {
++        m_editor->setClipStart(track, m_editor->selectedClip(), 0.0);
++        m_editor->setClipDuration(track, m_editor->selectedClip(), m_pendingVoiceDuration);
++    }
++
++    m_pendingVoiceAssetId.clear();
++    m_pendingVoiceDuration = 0.0;
++}
++
++void FishAudioController::scheduleAutoPlacement()
++{
++    if (m_autoPlacementScheduled || !m_autoPlaceMedia || m_blocks.isEmpty())
++        return;
++
++    m_autoPlacementScheduled = true;
++    QTimer::singleShot(120, this, [this] {
++        m_autoPlacementScheduled = false;
++        autoPlaceAvailableMedia();
++    });
++}
++
++QList<int> FishAudioController::visualAssetIndexesInNaturalOrder() const
++{
++    QList<int> indexes;
++    if (!m_assets)
++        return indexes;
++
++    for (int i = 0; i < m_assets->count(); ++i) {
++        const QVariantMap asset = m_assets->assetAt(i);
++        const QString kind = asset.value(QStringLiteral("kind")).toString();
++        if (kind == QStringLiteral("image") || kind == QStringLiteral("video"))
++            indexes.append(i);
++    }
++
++    QCollator collator;
++    collator.setNumericMode(true);
++    collator.setCaseSensitivity(Qt::CaseInsensitive);
++
++    std::sort(indexes.begin(), indexes.end(), [this, &collator](int a, int b) {
++        const QString left = m_assets->assetAt(a).value(QStringLiteral("name")).toString();
++        const QString right = m_assets->assetAt(b).value(QStringLiteral("name")).toString();
++        return collator.compare(left, right) < 0;
++    });
++
++    return indexes;
++}
++
++bool FishAudioController::placeVisualAsset(int assetIndex, int blockIndex)
++{
++    if (!m_assets || !m_editor || blockIndex < 0 || blockIndex >= m_blocks.size())
++        return false;
++
++    const QVariantMap asset = m_assets->assetAt(assetIndex);
++    const QString assetId = asset.value(QStringLiteral("id")).toString();
++    if (assetId.isEmpty() || m_placedVisualAssetIds.contains(assetId))
++        return false;
++    if (m_assets->isImportPending(assetId))
++        return false;
